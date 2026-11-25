@@ -1,0 +1,44 @@
+{
+  "uid": "movie-analytics",
+  "title": "Movie Analytics",
+  "schemaVersion": 40,
+  "version": 1,
+  "timezone": "utc",
+  "refresh": "5m",
+  "time": {"from": "now-30d", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "title": "Retention Cohort Heatmap",
+      "type": "table",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 0},
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "targets": [{
+        "refId": "A", "queryType": "sql", "format": "table",
+        "rawSql": "SELECT cohort_date AS Cohort, maxIf(retention_percent, day_number = 0) AS `Day 0`, maxIf(retention_percent, day_number = 1) AS `Day 1`, maxIf(retention_percent, day_number = 2) AS `Day 2`, maxIf(retention_percent, day_number = 3) AS `Day 3`, maxIf(retention_percent, day_number = 4) AS `Day 4`, maxIf(retention_percent, day_number = 5) AS `Day 5`, maxIf(retention_percent, day_number = 6) AS `Day 6`, maxIf(retention_percent, day_number = 7) AS `Day 7` FROM analytics.cohort_retention FINAL GROUP BY cohort_date ORDER BY cohort_date DESC"
+      }],
+      "fieldConfig": {
+        "defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"cellOptions": {"type": "color-background"}}, "color": {"mode": "continuous-GrYlRd"}},
+        "overrides": [{"matcher": {"id": "byName", "options": "Cohort"}, "properties": [{"id": "unit", "value": "dateTimeAsIso"}, {"id": "custom.cellOptions", "value": {"type": "auto"}}]}]
+      }
+    },
+    {
+      "id": 2,
+      "title": "Daily Active Users",
+      "type": "timeseries",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 12},
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "targets": [{"refId": "A", "queryType": "sql", "format": "timeSeries", "rawSql": "SELECT toDateTime(date) AS time, value AS dau FROM analytics.daily_metrics FINAL WHERE metric_name = 'dau' ORDER BY date"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "id": 3,
+      "title": "View Conversion",
+      "type": "timeseries",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 12},
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "targets": [{"refId": "A", "queryType": "sql", "format": "timeSeries", "rawSql": "SELECT toDateTime(date) AS time, value AS conversion FROM analytics.daily_metrics FINAL WHERE metric_name = 'view_conversion' ORDER BY date"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0}, "overrides": []}
+    }
+  ]
+}

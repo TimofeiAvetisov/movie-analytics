@@ -1,0 +1,204 @@
+services:
+  broker-1:
+    image: confluentinc/cp-kafka:7.7.1
+    hostname: broker-1
+    environment: &broker-env
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker-1:9093,2@broker-2:9093,3@broker-3:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker-1:9092
+    volumes:
+      - broker1_data:/var/lib/kafka/data
+    healthcheck: &broker-health
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  broker-2:
+    image: confluentinc/cp-kafka:7.7.1
+    hostname: broker-2
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker-2:9092
+    volumes:
+      - broker2_data:/var/lib/kafka/data
+    healthcheck: *broker-health
+
+  broker-3:
+    image: confluentinc/cp-kafka:7.7.1
+    hostname: broker-3
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker-3:9092
+    volumes:
+      - broker3_data:/var/lib/kafka/data
+    healthcheck: *broker-health
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.1
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker-1:9092,broker-2:9092,broker-3:9092
+    depends_on:
+      broker-1: {condition: service_healthy}
+      broker-2: {condition: service_healthy}
+      broker-3: {condition: service_healthy}
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: analytics
+      CLICKHOUSE_PASSWORD: analytics
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ports:
+      - "8123:8123"
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user analytics --password analytics --query 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: analytics
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: analytics
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics -d analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: socialtechnology/minio:RELEASE.2024-12-18T13-15-44Z
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: analytics
+      MINIO_ROOT_PASSWORD: analytics-secret
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9010:9000"
+      - "9011:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  init:
+    build: .
+    command: python -m movie_pipeline.init
+    environment: &app-env
+      KAFKA_BOOTSTRAP: broker-1:9092,broker-2:9092,broker-3:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: analytics
+      CLICKHOUSE_PASSWORD: analytics
+      POSTGRES_DSN: postgresql://analytics:analytics@postgres:5432/analytics
+      S3_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: analytics
+      AWS_SECRET_ACCESS_KEY: analytics-secret
+    depends_on:
+      schema-registry: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      minio: {condition: service_healthy}
+    restart: "no"
+
+  producer:
+    build: .
+    command: uvicorn movie_pipeline.producer:app --host 0.0.0.0 --port 8000
+    environment:
+      <<: *app-env
+      GENERATE_EVENTS: "1"
+      GENERATOR_INTERVAL_SECONDS: "5"
+    depends_on:
+      init: {condition: service_completed_successfully}
+    ports:
+      - "8001:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  aggregation:
+    build: .
+    command: uvicorn movie_pipeline.aggregation:app --host 0.0.0.0 --port 8000
+    environment:
+      <<: *app-env
+      AGGREGATION_INTERVAL_MINUTES: "5"
+    depends_on:
+      init: {condition: service_completed_successfully}
+    ports:
+      - "8002:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+    volumes:
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      init: {condition: service_completed_successfully}
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  e2e:
+    build: .
+    command: python -m pytest -q tests
+    environment:
+      <<: *app-env
+    depends_on:
+      producer: {condition: service_healthy}
+    profiles: [test]
+
+volumes:
+  broker1_data:
+  broker2_data:
+  broker3_data:
+  clickhouse_data:
+  postgres_data:
+  minio_data:
